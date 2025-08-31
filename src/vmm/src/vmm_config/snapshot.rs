@@ -4,6 +4,7 @@
 //! Configurations used in the snapshotting context.
 
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 /// For crates that depend on `vmm` we export.
 pub use semver::Version;
@@ -60,6 +61,16 @@ pub struct LoadSnapshotParams {
     /// When set to true, the vm is also resumed if the snapshot load
     /// is successful.
     pub resume_vm: bool,
+    /// Optional overlay file path used to overlay regions on top of base memory mapping.
+    pub overlay_file_path: Option<PathBuf>,
+    /// Optional overlay regions map: key is offset in pages, value is length in pages.
+    pub overlay_regions: Option<HashMap<u64, u64>>,
+    /// Optional working-set file path used to map active pages sequentially.
+    pub ws_file_path: Option<PathBuf>,
+    /// Optional working-set regions list: each entry is [offset_in_pages, length_in_pages].
+    pub ws_regions: Option<Vec<[u64; 2]>>,
+    /// If true, touch the mapped working-set pages locally to prefetch into memory.
+    pub load_ws: bool,
 }
 
 /// Stores the configuration for loading a snapshot that is provided by the user.
@@ -82,6 +93,21 @@ pub struct LoadSnapshotConfig {
     /// Whether or not to resume the vm post snapshot load.
     #[serde(default)]
     pub resume_vm: bool,
+    /// Optional overlay file path used to overlay regions on top of base memory mapping.
+    #[serde(default)]
+    pub overlay_file_path: Option<PathBuf>,
+    /// Optional overlay regions map: key is offset in pages, value is length in pages.
+    #[serde(default)]
+    pub overlay_regions: Option<HashMap<u64, u64>>,
+    /// Optional working-set file path used to map active pages sequentially.
+    #[serde(default)]
+    pub ws_file_path: Option<PathBuf>,
+    /// Optional working-set regions list: each entry is [offset_in_pages, length_in_pages].
+    #[serde(default)]
+    pub ws_regions: Option<Vec<[u64; 2]>>,
+    /// If true, touch the mapped working-set pages locally to prefetch into memory.
+    #[serde(default)]
+    pub load_ws: bool,
 }
 
 /// Stores the configuration used for managing snapshot memory.

@@ -99,6 +99,11 @@ fn parse_put_snapshot_load(body: &Body) -> Result<ParsedRequest, Error> {
         mem_backend,
         enable_diff_snapshots: snapshot_config.enable_diff_snapshots,
         resume_vm: snapshot_config.resume_vm,
+        overlay_file_path: snapshot_config.overlay_file_path,
+        overlay_regions: snapshot_config.overlay_regions,
+        ws_file_path: snapshot_config.ws_file_path,
+        ws_regions: snapshot_config.ws_regions,
+        load_ws: snapshot_config.load_ws,
     };
 
     // Construct the `ParsedRequest` object.

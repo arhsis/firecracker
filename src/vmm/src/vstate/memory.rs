@@ -7,6 +7,7 @@
 
 use std::fs::File;
 use std::io::SeekFrom;
+use std::os::unix::prelude::AsRawFd;
 
 use serde::{Deserialize, Serialize};
 use utils::{errno, get_page_size, u64_to_usize};
@@ -59,6 +60,26 @@ pub trait GuestMemoryExtension
 where
     Self: Sized,
 {
+    /// Apply overlay mappings on top of existing guest memory regions.
+    /// - `overlay_file_path`: file containing sparse pages; if None, skip.
+    /// - `overlay_regions`: list of (offset_pages, len_pages); file offset equals guest offset.
+    fn apply_overlay_mappings(
+        &self,
+        overlay_file_path: Option<&std::path::Path>,
+        overlay_regions: &[(u64, u64)],
+    ) -> Result<(), MemoryError>;
+
+    /// Apply working-set mappings from a compact file.
+    /// - `ws_file_path`: file whose content is a concatenation of segments in `ws_regions`.
+    /// - `ws_regions`: list of (offset_pages, len_pages); file segments are laid out sequentially.
+    fn apply_workingset_mappings(
+        &self,
+        ws_file_path: Option<&std::path::Path>,
+        ws_regions: &[(u64, u64)],
+    ) -> Result<(), MemoryError>;
+
+    /// Prefetch working-set pages by touching 1 byte per page.
+    fn prefetch_workingset(&self, ws_regions: &[(u64, u64)]) -> Result<(), MemoryError>;
     /// Creates a GuestMemoryMmap with `size` in MiB backed by a memfd.
     fn memfd_backed(
         mem_size_mib: usize,
@@ -270,6 +291,114 @@ impl GuestMemoryExtension for GuestMemoryMmap {
             offset += region.len();
         });
         guest_memory_state
+    }
+
+    fn apply_overlay_mappings(
+        &self,
+        overlay_file_path: Option<&std::path::Path>,
+        overlay_regions: &[(u64, u64)],
+    ) -> Result<(), MemoryError> {
+        if overlay_regions.is_empty() || overlay_file_path.is_none() {
+            return Ok(());
+        }
+
+        // For simplicity and to match the referenced patch, only support one contiguous region.
+        // We use the first region's start address as base.
+        let page_size = utils::get_page_size().map_err(MemoryError::PageSize)? as u64;
+        let region = self.iter().next().ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))?;
+        let base_addr = self
+            .get_host_address(region.start_addr())
+            .ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))? as *mut u8;
+
+        let file = File::open(overlay_file_path.unwrap()).map_err(MemoryError::FileError)?;
+        let fd = file.as_raw_fd();
+        for (off_pages, len_pages) in overlay_regions.iter().copied() {
+            let offset = off_pages.saturating_mul(page_size);
+            let length = len_pages.saturating_mul(page_size);
+            // Safety: mapping fixed range on top of already mmap-ed base region.
+            let ret = unsafe {
+                libc::mmap(
+                    base_addr.add(offset as usize) as *mut _,
+                    length as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE,
+                    fd,
+                    offset as libc::off_t,
+                )
+            };
+            if ret == libc::MAP_FAILED {
+                return Err(MemoryError::FileError(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_workingset_mappings(
+        &self,
+        ws_file_path: Option<&std::path::Path>,
+        ws_regions: &[(u64, u64)],
+    ) -> Result<(), MemoryError> {
+        if ws_regions.is_empty() || ws_file_path.is_none() {
+            return Ok(());
+        }
+
+        let page_size = utils::get_page_size().map_err(MemoryError::PageSize)? as u64;
+        let region = self.iter().next().ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))?;
+        let base_addr = self
+            .get_host_address(region.start_addr())
+            .ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))? as *mut u8;
+
+        let file = File::open(ws_file_path.unwrap()).map_err(MemoryError::FileError)?;
+        let fd = file.as_raw_fd();
+        let mut file_off: u64 = 0;
+        for (off_pages, len_pages) in ws_regions.iter().copied() {
+            let offset = off_pages.saturating_mul(page_size);
+            let length = len_pages.saturating_mul(page_size);
+            let ret = unsafe {
+                libc::mmap(
+                    base_addr.add(offset as usize) as *mut _,
+                    length as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_FIXED | libc::MAP_NORESERVE | libc::MAP_PRIVATE,
+                    fd,
+                    file_off as libc::off_t,
+                )
+            };
+            if ret == libc::MAP_FAILED {
+                return Err(MemoryError::FileError(std::io::Error::last_os_error()));
+            }
+            file_off = file_off.saturating_add(length);
+        }
+        Ok(())
+    }
+
+    fn prefetch_workingset(&self, ws_regions: &[(u64, u64)]) -> Result<(), MemoryError> {
+        if ws_regions.is_empty() {
+            return Ok(());
+        }
+        let page_size = utils::get_page_size().map_err(MemoryError::PageSize)? as u64;
+        // Iterate all regions; touch within specified offsets relative to the first region.
+        // For now, assume a single contiguous region as in the patch.
+        let region = self.iter().next().ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))?;
+        let base_ptr = self
+            .get_host_address(region.start_addr())
+            .ok_or_else(|| MemoryError::VmMemoryError(VmMemoryError::PartialBuffer))? as *const u8;
+        let mut acc: u8 = 0;
+        for (off_pages, len_pages) in ws_regions.iter().copied() {
+            let start = off_pages.saturating_mul(page_size);
+            let length = len_pages.saturating_mul(page_size);
+            let end = start.saturating_add(length);
+            let mut pos = start;
+            while pos < end {
+                unsafe {
+                    let p = base_ptr.add(pos as usize);
+                    acc ^= *p;
+                }
+                pos = pos.saturating_add(page_size);
+            }
+        }
+        let _ = acc; // keep optimizer from eliding reads
+        Ok(())
     }
 
     /// Mark memory range as dirty

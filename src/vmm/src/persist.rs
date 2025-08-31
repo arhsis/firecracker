@@ -415,16 +415,44 @@ pub fn restore_from_snapshot(
     let mem_state = &microvm_state.memory_state;
 
     let (guest_memory, uffd) = match params.mem_backend.backend_type {
-        MemBackendType::File => (
-            guest_memory_from_file(
+        MemBackendType::File => {
+            let guest_memory = guest_memory_from_file(
                 mem_backend_path,
                 mem_state,
                 track_dirty_pages,
                 vm_resources.vm_config.huge_pages,
             )
-            .map_err(RestoreFromSnapshotGuestMemoryError::File)?,
-            None,
-        ),
+            .map_err(RestoreFromSnapshotGuestMemoryError::File)?;
+
+            // Apply optional overlay and working-set mappings, followed by optional prefetch.
+            let overlay_regions: Vec<(u64, u64)> = params
+                .overlay_regions
+                .as_ref()
+                .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+                .unwrap_or_default();
+            let ws_regions: Vec<(u64, u64)> = params
+                .ws_regions
+                .as_ref()
+                .map(|v| v.iter().map(|x| (x[0], x[1])).collect())
+                .unwrap_or_default();
+
+            guest_memory
+                .apply_overlay_mappings(params.overlay_file_path.as_deref(), &overlay_regions)
+                .map_err(GuestMemoryFromFileError::Restore)
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?;
+            guest_memory
+                .apply_workingset_mappings(params.ws_file_path.as_deref(), &ws_regions)
+                .map_err(GuestMemoryFromFileError::Restore)
+                .map_err(RestoreFromSnapshotGuestMemoryError::File)?;
+            if params.load_ws {
+                guest_memory
+                    .prefetch_workingset(&ws_regions)
+                    .map_err(GuestMemoryFromFileError::Restore)
+                    .map_err(RestoreFromSnapshotGuestMemoryError::File)?;
+            }
+
+            (guest_memory, None)
+        }
         MemBackendType::Uffd => guest_memory_from_uffd(
             mem_backend_path,
             mem_state,

@@ -1234,6 +1234,36 @@ definitions:
         type: boolean
         description:
           When set to true, the vm is also resumed if the snapshot load is successful.
+      overlay_file_path:
+        type: string
+        description:
+          Optional overlay file path used to overlay regions on top of base memory mapping.
+      overlay_regions:
+        type: object
+        additionalProperties:
+          type: integer
+          format: int64
+        description:
+          Optional overlay regions map: key is offset in pages, value is length in pages.
+      ws_file_path:
+        type: string
+        description:
+          Optional working-set file path used to map active pages sequentially.
+      ws_regions:
+        type: array
+        items:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: integer
+            format: int64
+        description:
+          Optional working-set regions list: each entry is [offset_in_pages, length_in_pages].
+      load_ws:
+        type: boolean
+        description:
+          If true, touch the mapped working-set pages locally to prefetch into memory.
 
   TokenBucket:
     type: object
